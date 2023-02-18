@@ -4,111 +4,100 @@
  * Author: HoaLe
  */
 #include <Arduino.h>
-#include <NimBLEDevice.h>
+#include <WiFi.h>
+#include <WiFiAP.h>
+#include <WiFiClient.h>
+#include "SoundData.h"
+#include "XT_DAC_Audio.h"
+
+const char* ssid     = "KIT";
+const char* password = "KIT123!@#";
 
 #define BOMB_NO 6
-const uint16_t SERVICE_UUID = 22677;
+#define SERVER_PORT 4080
+
+
+byte mac[] = {0x00, 0xAA, 0xBB, 0xCC, 0xDE, 0x02};
+WiFiServer server(SERVER_PORT);
+
+XT_Wav_Class Sound(sample);
+XT_DAC_Audio_Class DacAudio(GPIO_NUM_25,0);
 
 const uint8_t GPIO_PIN_LIST[BOMB_NO] = {
   GPIO_NUM_12, // 12
   GPIO_NUM_14, // 14
   GPIO_NUM_27, // 27
-  GPIO_NUM_25, // 26
+  GPIO_NUM_33, // ?
   GPIO_NUM_26, // 25
   GPIO_NUM_32 // 32
-};
-
-const std::string CHAR_UUID_LIST[BOMB_NO] = {
-  "00000000-0000-0000-0000-000000000001", 
-  "00000000-0000-0000-0000-000000000002", 
-  "00000000-0000-0000-0000-000000000003", 
-  "00000000-0000-0000-0000-000000000004", 
-  "00000000-0000-0000-0000-000000000005", 
-  "00000000-0000-0000-0000-000000000006", 
-};
-
-static BLEServer* pServer;
-
-class ServerCallbacks: public NimBLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-        Serial.println("Client connected");
-        Serial.println("Multi-connect support: start advertising");
-        NimBLEDevice::startAdvertising();
-    };
-    void onDisconnect(BLEServer* pServer) {
-        Serial.println("Client disconnected - start advertising");
-        NimBLEDevice::startAdvertising();
-    };
 };
 
 void setup() {
   // Serial
   Serial.begin(115200);
 
+  Serial.println();
+  Serial.println("Configuring access point...");
 
-  // BLE
-  NimBLEDevice::init("BigBang");
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-
-  NimBLEDevice::setSecurityAuth(true, true, true);
-  NimBLEDevice::setSecurityPasskey(123456);
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
-  NimBLEService *pService = pServer->createService(NimBLEUUID(SERVICE_UUID));
-
-  for (size_t i = 0; i < BOMB_NO; i++)
-  {
-    NimBLECharacteristic *pCharacteristic = pService->createCharacteristic(
-      BLEUUID(CHAR_UUID_LIST[i]),
-      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::WRITE
-    );
+  // You can remove the password parameter if you want the AP to be open.
+  // a valid password must have more than 7 characters
+  if (!WiFi.softAP(ssid, password, 1, 1, 1)) { // channel 1, Hidden, limit 1 connection
+    log_e("Soft AP creation failed.");
+    while(1);
   }
+  IPAddress myIP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(myIP);
+  server.begin();
 
-  pService->start();
+  Serial.println("Server started");
 
   // GPIO
   for (size_t i = 0; i < BOMB_NO; i++)
   {
     pinMode(GPIO_PIN_LIST[i], OUTPUT); // output
     digitalWrite(GPIO_PIN_LIST[i], LOW);
-    NimBLECharacteristic *pCharacteristic = pService->getCharacteristic(NimBLEUUID(CHAR_UUID_LIST[i]));
-    uint8_t gpioState = digitalRead(GPIO_PIN_LIST[i]);
-    pCharacteristic->setValue(&gpioState, 1);
   }
-  
-  NimBLEAdvertising* pAdvertising = pServer->getAdvertising();
-  pAdvertising->addServiceUUID(pService->getUUID());
-  pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);
-  pAdvertising->setMaxPreferred(0x12);
-  pAdvertising->start();
-  Serial.println("Advertising Started");
 }
 
-void loop() {
-  if(pServer->getConnectedCount()) {
-    NimBLEService* pService = pServer->getServiceByUUID(SERVICE_UUID);
-    if(pService) {
-      for (size_t i = 0; i < BOMB_NO; i++)
-      {
-        NimBLECharacteristic *pCharacteristic = pService->getCharacteristic(
-          NimBLEUUID(CHAR_UUID_LIST[i])
-        );
-        std::string rxValue = pCharacteristic->getValue();
-        Serial.print(rxValue.c_str());
-        
-        if (rxValue.length() > 0 && rxValue.at(0) == 1) { 
-          digitalWrite(GPIO_PIN_LIST[i], HIGH);
-        } else {
-          digitalWrite(GPIO_PIN_LIST[i], LOW);
-        }
-        pCharacteristic->notify();
-        Serial.print(",");
-      }
-      Serial.println("");
-    }
+void playsound() {
+  DacAudio.FillBuffer();     
+  if (Sound.Playing==false) {
+    Serial.println("Playsound.");
+    DacAudio.Play(&Sound);
   }
+}
 
-  delay(2000);
+unsigned long currentMill = 0;
+uint8_t currentBomb = 100;
+
+void loop() {
+  WiFiClient client = server.available();
+  if (client) {                             // if you get a client,
+    Serial.println("New Client.");           // print a message out the serial port
+    while (client.connected()) {            // loop while the client's connected
+      if (currentBomb != 100) {
+        if (millis() > currentMill + 2300) {
+          digitalWrite(GPIO_PIN_LIST[currentBomb], LOW);
+          client.write(currentBomb);
+          currentBomb = 100;
+          DacAudio.StopAllSounds();
+        } else {
+          playsound();
+        }
+      }
+
+      if (client.available()) {             // if there's bytes to read from the client,
+        uint8_t c = client.read() - 48;             // read a byte, then
+        Serial.print("Receive sign from kit: ");
+        Serial.println(c);                    // print it out the serial monitor
+        currentBomb = c;
+        digitalWrite(GPIO_PIN_LIST[c], HIGH);
+        currentMill = millis();
+      }
+    }
+    // close the connection:
+    client.stop();
+    Serial.println("Client Disconnected.");
+  }
 }
